@@ -56,3 +56,87 @@ func TestExtractInstagramProfileLinksRejectsEmptyWorkbook(t *testing.T) {
 		t.Fatalf("error = %q, want it to mention %q", got, want)
 	}
 }
+
+func TestUpdateInstagramProfileNamesInWorkbook(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "profiles.xlsx")
+	f := excelize.NewFile()
+	defer f.Close()
+
+	layouts := []struct {
+		sheet          string
+		usernameHeader string
+		nameColumn     string
+	}{
+		{"Sheet1", "", "B"},
+		{"WithUsername", "USERNAME", "C"},
+		{"EmptyUsername", "USERNAME", "C"},
+		{"NormalizedHeader", "  UserName  ", "C"},
+	}
+	for i, layout := range layouts {
+		if i > 0 {
+			if _, err := f.NewSheet(layout.sheet); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cells := map[string]string{
+			"A1": "PROFILE",
+			"A2": "https://www.instagram.com/alpha",
+			"A3": "https://www.instagram.com/beta",
+		}
+		if layout.usernameHeader != "" {
+			cells["B1"] = layout.usernameHeader
+			cells["B2"] = "alpha"
+			if layout.sheet == "EmptyUsername" {
+				cells["B2"] = ""
+				cells["C1"] = "NAME"
+			}
+		}
+		for cell, value := range cells {
+			if err := f.SetCellValue(layout.sheet, cell, value); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := f.SaveAs(path); err != nil {
+		t.Fatalf("save workbook: %v", err)
+	}
+
+	// A second run must update the same output column and preserve source data.
+	for _, name := range []string{"Alpha Smith", "Alpha Updated"} {
+		if err := updateInstagramProfileNamesInWorkbook(path, map[string]string{
+			"https://www.instagram.com/alpha": name,
+		}); err != nil {
+			t.Fatalf("update workbook names: %v", err)
+		}
+		updated, err := excelize.OpenFile(path)
+		if err != nil {
+			t.Fatalf("open updated workbook: %v", err)
+		}
+		for _, layout := range layouts {
+			want := map[string]string{
+				"A1":                    "PROFILE",
+				"A2":                    "https://www.instagram.com/alpha",
+				"A3":                    "https://www.instagram.com/beta",
+				layout.nameColumn + "1": "NAME",
+				layout.nameColumn + "2": name,
+				layout.nameColumn + "3": "",
+			}
+			if layout.usernameHeader != "" {
+				want["B1"] = layout.usernameHeader
+				want["B2"] = "alpha"
+				if layout.sheet == "EmptyUsername" {
+					want["B2"] = ""
+				}
+			} else {
+				want["C1"] = ""
+				want["C2"] = ""
+			}
+			for cell, expected := range want {
+				if got, err := updated.GetCellValue(layout.sheet, cell); err != nil || got != expected {
+					t.Errorf("%s!%s = %q, want %q, err = %v", layout.sheet, cell, got, expected, err)
+				}
+			}
+		}
+		updated.Close()
+	}
+}

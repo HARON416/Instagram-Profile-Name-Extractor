@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,7 +17,12 @@ var instagramURLPattern = regexp.MustCompile(`(?i)https?://(?:www\.|m\.)?instagr
 func main() {
 	installBrowserInterruptCleanup()
 
-	workbookPath := filepath.Join(".", "profiles.xlsx")
+	workbookPath, err := filepath.Abs("profiles.xlsx")
+	if err != nil {
+		Errorf("Unable to resolve workbook path: %v", err)
+		os.Exit(1)
+	}
+	Infof("Using workbook: %s", workbookPath)
 	profileLinks, err := extractInstagramProfileLinks(workbookPath)
 	if err != nil {
 		Errorf("Unable to read Instagram profile links from %s: %v", workbookPath, err)
@@ -34,27 +38,36 @@ func main() {
 	browser, page := openBrowser()
 	defer closeActiveBrowser()
 
+	profileNames := make(map[string]string, len(profileLinks))
 	for index, profileURL := range profileLinks {
 		Infof("Visiting profile %d/%d: %s", index+1, len(profileLinks), profileURL)
 		body, ok := scrapeInstagramProfile(page, profileURL)
 		if !ok {
 			Warnf("Skipping %s because the profile data could not be captured", profileURL)
-			if index < len(profileLinks)-1 {
-				pauseBetweenProfileVisits()
-			}
 			continue
 		}
-		if _, err := parseInstagramProfileResponse(body); err != nil {
+		profile, err := parseInstagramProfileResponse(body)
+		if err != nil {
 			Warnf("Profile data for %s was captured but did not parse: %v", profileURL, err)
-			if index < len(profileLinks)-1 {
-				pauseBetweenProfileVisits()
-			}
 			continue
 		}
-		Infof("Profile %s processed successfully", profileURL)
-		if index < len(profileLinks)-1 {
-			pauseBetweenProfileVisits()
+		name := strings.TrimSpace(profile.FullName)
+		if name == "" {
+			Warnf("Profile %s returned an empty full name; leaving its existing NAME value unchanged", profileURL)
+			continue
 		}
+		profileNames[profileURL] = name
+		Infof("Profile %s processed successfully", profileURL)
+	}
+
+	Infof("Scraping finished: captured %d nonempty name(s) from %d profile(s)", len(profileNames), len(profileLinks))
+	if len(profileNames) == 0 {
+		Warn("No nonempty names were captured; workbook left unchanged. Check the scraping warnings above.")
+		return
+	}
+	if err := updateInstagramProfileNamesInWorkbook(workbookPath, profileNames); err != nil {
+		Errorf("Unable to write profile names back to %s: %v", workbookPath, err)
+		os.Exit(1)
 	}
 
 	_ = browser
@@ -188,14 +201,62 @@ func waitForProfilePage(page *rod.Page, url string) error {
 	return page.WaitLoad()
 }
 
-func pauseBetweenProfileVisits() {
-	delay := time.Duration(rand.Intn(4500)+1500) * time.Millisecond
-	Infof("Waiting %.1f seconds before the next profile visit", delay.Seconds())
-	time.Sleep(delay)
+func updateInstagramProfileNamesInWorkbook(workbookPath string, profileNames map[string]string) error {
+	file, err := excelize.OpenFile(workbookPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	updatedCells := 0
+	for _, sheetName := range file.GetSheetList() {
+		rows, err := file.GetRows(sheetName)
+		if err != nil {
+			return fmt.Errorf("read sheet %q: %w", sheetName, err)
+		}
+		nameColumn := "B"
+		if len(rows) > 0 {
+			for _, header := range rows[0] {
+				if strings.EqualFold(strings.TrimSpace(header), "USERNAME") {
+					nameColumn = "C"
+					break
+				}
+			}
+		}
+		Infof("Sheet %q: writing names to column %s", sheetName, nameColumn)
+		if err := file.SetCellValue(sheetName, nameColumn+"1", "NAME"); err != nil {
+			return err
+		}
+		for rowIndex, row := range rows {
+			if rowIndex == 0 {
+				continue
+			}
+			for _, cellValue := range row {
+				link := normalizeInstagramProfileLink(cellValue)
+				if link == "" {
+					continue
+				}
+				name, ok := profileNames[link]
+				if !ok {
+					continue
+				}
+				cellRef := fmt.Sprintf("%s%d", nameColumn, rowIndex+1)
+				if err := file.SetCellValue(sheetName, cellRef, name); err != nil {
+					return err
+				}
+				updatedCells++
+				break
+			}
+		}
+	}
+	if err := file.Save(); err != nil {
+		return fmt.Errorf("save workbook %q: %w", workbookPath, err)
+	}
+	Successf("Saved %d NAME cell(s) to %s", updatedCells, workbookPath)
+	return nil
 }
 
 func init() {
 	_ = waitForProfilePage
 	_ = time.Now
-	rand.Seed(time.Now().UnixNano())
 }
