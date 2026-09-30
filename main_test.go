@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -101,14 +102,42 @@ func TestUpdateInstagramProfileNamesInWorkbook(t *testing.T) {
 		t.Fatalf("save workbook: %v", err)
 	}
 
-	// A second run must update the same output column and preserve source data.
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousResults := make(map[string][]byte)
+	// Repeated runs create separate results and never change the input or earlier results.
 	for _, name := range []string{"Alpha Smith", "Alpha Updated"} {
 		if err := updateInstagramProfileNamesInWorkbook(path, map[string]string{
 			"https://www.instagram.com/alpha": name,
 		}); err != nil {
 			t.Fatalf("update workbook names: %v", err)
 		}
-		updated, err := excelize.OpenFile(path)
+		input, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(input, original) {
+			t.Fatalf("source workbook changed: %v", err)
+		}
+		outputs, err := filepath.Glob(filepath.Join(filepath.Dir(path), "profiles_results-*.xlsx"))
+		if err != nil || len(outputs) != len(previousResults)+1 {
+			t.Fatalf("expected one new results file, got %v: %v", outputs, err)
+		}
+		var outputPath string
+		for _, candidate := range outputs {
+			data, err := os.ReadFile(candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if previous, exists := previousResults[candidate]; exists {
+				if !bytes.Equal(data, previous) {
+					t.Fatal("previous results were changed")
+				}
+			} else {
+				outputPath = candidate
+				previousResults[candidate] = data
+			}
+		}
+		updated, err := excelize.OpenFile(outputPath)
 		if err != nil {
 			t.Fatalf("open updated workbook: %v", err)
 		}
@@ -138,5 +167,14 @@ func TestUpdateInstagramProfileNamesInWorkbook(t *testing.T) {
 			}
 		}
 		updated.Close()
+	}
+}
+
+func TestSaveResultsWorkbookReportsCreationFailure(t *testing.T) {
+	file := excelize.NewFile()
+	defer file.Close()
+	path, err := saveResultsWorkbook(file, filepath.Join(t.TempDir(), "missing"))
+	if err == nil || path != "" || !strings.Contains(err.Error(), "create results workbook") {
+		t.Fatalf("path = %q, err = %v", path, err)
 	}
 }

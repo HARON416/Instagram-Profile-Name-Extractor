@@ -62,11 +62,11 @@ func main() {
 
 	Infof("Scraping finished: captured %d nonempty name(s) from %d profile(s)", len(profileNames), len(profileLinks))
 	if len(profileNames) == 0 {
-		Warn("No nonempty names were captured; workbook left unchanged. Check the scraping warnings above.")
+		Warn("No nonempty names were captured; no results file created. Check the scraping warnings above.")
 		return
 	}
 	if err := updateInstagramProfileNamesInWorkbook(workbookPath, profileNames); err != nil {
-		Errorf("Unable to write profile names back to %s: %v", workbookPath, err)
+		Errorf("Unable to create results workbook from %s: %v", workbookPath, err)
 		os.Exit(1)
 	}
 
@@ -249,11 +249,39 @@ func updateInstagramProfileNamesInWorkbook(workbookPath string, profileNames map
 			}
 		}
 	}
-	if err := file.Save(); err != nil {
-		return fmt.Errorf("save workbook %q: %w", workbookPath, err)
+	outputPath, err := saveResultsWorkbook(file, filepath.Dir(workbookPath))
+	if err != nil {
+		return err
 	}
-	Successf("Saved %d NAME cell(s) to %s", updatedCells, workbookPath)
+	Successf("Saved %d NAME cell(s) to %s", updatedCells, outputPath)
 	return nil
+}
+
+// Create a unique results file so neither the source nor previous results are overwritten.
+func saveResultsWorkbook(file *excelize.File, directory string) (string, error) {
+	output, err := os.CreateTemp(directory, "profiles_results-*.xlsx")
+	if err != nil {
+		return "", fmt.Errorf("create results workbook in %q: %w", directory, err)
+	}
+	outputPath := output.Name()
+	saved := false
+	defer func() {
+		if !saved {
+			_ = output.Close()
+			_ = os.Remove(outputPath)
+		}
+	}()
+	if err := file.Write(output); err != nil {
+		return "", fmt.Errorf("write results workbook %q: %w", outputPath, err)
+	}
+	if err := output.Sync(); err != nil {
+		return "", fmt.Errorf("flush results workbook %q: %w", outputPath, err)
+	}
+	if err := output.Close(); err != nil {
+		return "", fmt.Errorf("close results workbook %q: %w", outputPath, err)
+	}
+	saved = true
+	return outputPath, nil
 }
 
 func init() {
